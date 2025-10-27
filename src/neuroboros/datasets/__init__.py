@@ -58,7 +58,6 @@ def default_prep(dm, confounds, cortical_mask, z=True, mask=True, gsr=False):
         dm = np.nan_to_num(zscore(dm, axis=0))
     return dm
 
-
 def scrub_prep(dm, confounds, cortical_mask, z=True, mask=True, gsr=False):
     if mask and cortical_mask is not None:
         dm = dm[:, cortical_mask]
@@ -74,6 +73,34 @@ def scrub_prep(dm, confounds, cortical_mask, z=True, mask=True, gsr=False):
         dm = np.nan_to_num(zscore(dm, axis=0))
     return dm, keep
 
+def saved_beta_prep(dm, confounds, cortical_mask, z=True, mask=True, gsr=False,beta = None, saved_beta_fn = None):
+    assert not((beta is None) and (saved_beta_fn is None)) 
+    def get_beta(dm, confounds, cortical_mask=None,gsr=False,mask=True):
+        if mask and cortical_mask is not None:
+            dm = dm[:, cortical_mask]
+        conf = confounds[0]
+        if gsr:
+            gs = np.array(confounds[1]["global_signal"])
+            conf = np.concatenate([conf, gs[:, np.newaxis]], axis=1)
+        finite_mask = np.all(np.isfinite(dm), axis=0)
+        beta = np.linalg.lstsq(conf, dm[:, finite_mask], rcond=None)[0]
+        return beta
+
+    def prep_with_saved_betas(dm, confounds, beta, cortical_mask = None, z=True,mask=True):
+        if mask and cortical_mask is not None:
+            dm = dm[:, cortical_mask]
+        conf = confounds[0]
+        finite_mask = np.all(np.isfinite(dm), axis=0)
+        dm[:, finite_mask] = dm[:, finite_mask] - conf @ beta
+        if z:
+            dm = np.nan_to_num(zscore(dm, axis=0))
+        return dm
+    if beta is None:
+        beta = get_beta(dm, confounds, cortical_mask=cortical_mask,gsr=gsr,mask=mask)
+        os.makedirs(os.path.dirname(saved_beta_fn),exist_ok=True)
+        np.save(saved_beta_fn,beta)
+    dm = prep_with_saved_betas(dm, confounds, beta, cortical_mask = cortical_mask, z=z,mask=mask)
+    return dm
 
 def get_prep(name, **kwargs):
     if name.endswith("-gsr"):
@@ -85,13 +112,13 @@ def get_prep(name, **kwargs):
     prep = {
         "default": default_prep,
         "scrub": scrub_prep,
+        "saved_beta":saved_beta_prep
     }[name]
     if gsr:
         prep = partial(prep, gsr=True)
     if kwargs:
         prep = partial(prep, **kwargs)
     return prep
-
 
 class Dataset:
     def __init__(
@@ -140,7 +167,6 @@ class Dataset:
         self.volume_space = volume_space
         self.surface_resample = surface_resample
         self.volume_resample = volume_resample
-
         if space is not None:
             if not isinstance(space, (tuple, list)):
                 space = [space]
@@ -176,11 +202,11 @@ class Dataset:
             with open(fn) as f:
                 self.subject_sets[task] = f.read().splitlines()
 
-    def load_data(self, sid, task, run, lr, space, resample, fp_version=None):
+    def load_data(self, sid, task, run, lr, space, resample, fp_version=None,return_fn=False):
         if lr == "lr":
             dm = np.concatenate(
                 [
-                    self.load_data(sid, task, run, lr_, space, resample, fp_version)
+                    self.load_data(sid, task, run, lr_, space, resample, fp_version,return_fn)
                     for lr_ in "lr"
                 ],
                 axis=1,
@@ -219,12 +245,51 @@ class Dataset:
                 f"sub-{sid}_task-{task}_run-{run:02d}.npy",
             ]
             fn = self.renaming["/".join(fn)].split("/")
-
-        dm = self.dl_dset.get(fn, on_missing="raise").astype(np.float64)
-
-        return dm
-
-    def load_confounds(self, sid, task, run, fp_version=None):
+        if return_fn:
+            return os.path.join(*fn)
+        else:
+            dm = self.dl_dset.get(fn, on_missing="raise").astype(np.float64)
+            return dm
+    
+    def load_saved_betas(self, sid, task, run, lr,  space, resample, fp_version=None,saved_beta_path=None, return_fn=False):
+        if lr == "lr":
+            beta = np.concatenate(
+                [
+                    self.load_saved_betas(sid, task, run, lr_,space, resample, fp_version, saved_beta_path,return_fn=False)
+                    for lr_ in "lr"
+                ],
+                axis=1,
+            )
+            return beta
+        data_fn = self.load_data(sid, task, run, lr, space, resample, fp_version=fp_version,return_fn=True)
+        beta_fn = os.path.join(saved_beta_path,data_fn).replace('.npy','_beta.npy').replace('*','0')
+        if return_fn:
+            return beta_fn
+        else:
+            beta = np.load(beta_fn)
+            return beta
+        # if lr in ["l", "r"]:
+        #     lr = f"{lr}-cerebrum"
+        # if self.rename_func is not None:
+        #     fn = [saved_beta_path,lr,
+        #         self.rename_func(sid, task, run),
+        #     ]
+        # elif self.renaming is None:
+        #     fn = [saved_beta_path,lr,
+        #         f"sub-{sid}_task-{task}_run-{run:02d}.npy",
+        #     ]
+        # else:
+        #     fn = [saved_beta_path,lr,
+        #         f"sub-{sid}_task-{task}_run-{run:02d}.npy",
+        #     ]
+        #     fn = self.renaming["/".join(fn)].split("/")
+        # if return_fn:
+        #     return os.path.join(*fn).replace('*','0')
+        # else:
+        #     beta = np.load(os.path.join(*fn).replace('*','0'))
+        #     return beta
+        
+    def load_confounds(self, sid, task, run, fp_version=None,return_fn = False):
         if fp_version is None:
             fp_version = self.fp_version
         suffix_li = [
@@ -233,6 +298,7 @@ class Dataset:
             "desc-mask_timeseries.npy",
         ]
         output = []
+        fns = []
         for suffix in suffix_li:
             if self.rename_func is not None:
                 fn = [
@@ -253,9 +319,16 @@ class Dataset:
                     f"sub-{sid}_task-{task}_run-{run:02d}_{suffix}",
                 ]
                 fn = self.renaming["/".join(fn)].split("/")
-            o = self.dl_dset.get(fn, on_missing="raise")
-            output.append(o)
-        return output
+            if return_fn:
+                fns.append(os.path.join(*fn))
+            else:
+                o = self.dl_dset.get(fn, on_missing="raise")
+                output.append(o)
+        
+        if return_fn:
+            return fns
+        else:
+            return output
 
     def load_design(self, sid, task, run, fp_version=None):
         if fp_version is None:
@@ -306,7 +379,6 @@ class Dataset:
             }[space_kind]
         if prep is None:
             prep = self.prep
-
         if fp_version is None:
             fp_version = self.fp_version
         suffix = f"{kind}.npy"
@@ -404,12 +476,25 @@ class Dataset:
         mask = self.mask if mask is None else mask
         if mask is not None:
             prep_kwargs["mask"] = mask
+        new_prep_kwargs = prep_kwargs.copy()
+        if prep == 'saved_beta':
+            if not prep_kwargs["saved_beta_path"]:
+                raise ValueError("Expect a valid saved_beta_path to be in prep_kwargs")
+            else:
+                if prep_kwargs["load_beta"]:
+                    new_prep_kwargs["beta"] = self.load_saved_betas(sid,task,run,lr,space, resample, fp_version,saved_beta_path=prep_kwargs["saved_beta_path"])
+                else:
+                    new_prep_kwargs["saved_beta_fn"] = self.load_saved_betas(sid,task,run,lr,space, resample, fp_version,saved_beta_path=prep_kwargs["saved_beta_path"],return_fn=True)
+                del new_prep_kwargs["load_beta"],new_prep_kwargs["saved_beta_path"]
+
         if isinstance(prep, str):
-            prep = get_prep(prep, **prep_kwargs)
+            prep = get_prep(prep, **new_prep_kwargs)
         if slicer is not None:
             dm = slicer(dm, task, run)
             confounds = [slicer(c, task, run) for c in confounds]
+
         dm = prep(dm, confounds, cortical_mask)
+        
         return dm
 
     def _get_anatomical_data(self, sid, which, lr, mask, space, fp_version):
