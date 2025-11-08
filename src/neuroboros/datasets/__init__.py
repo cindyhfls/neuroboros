@@ -31,7 +31,7 @@ SURFACE_RESAMPLES = [
     "2step_normals-sine_nnfr",
 ]
 VOLUME_SPACES = ["mni-2mm", "mni-3mm", "mni-4mm"]
-VOLUME_RESAMPLES = ["1step_linear_overlap", "1step_fmriprep_overlap"]
+VOLUME_RESAMPLES = ["1step_linear_overlap", "1step_fmriprep_overlap","1step_linear_nilearn"]
 
 
 def guess_surface_volume(space, resample, lr):
