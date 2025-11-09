@@ -899,8 +899,6 @@ class Budapest(Dataset):
         Returns
         -------
         """
-        sid = str(sid).zfill(4)
-        run = int(run)
 
         # timing_dir = os.path.expanduser('~/hyperface/timing')  # commented out dependency
         hyperface_runs = [2, 3, 4, 6, 7, 8]
@@ -922,7 +920,7 @@ class Budapest(Dataset):
         elif task == "visualmemory":
             run_ = hyperface_runs.index(run) + 1
             new_task = "hyperface"
-            raise ValueError("The hyperface renaming is inaccurate, please ignore it for now.")
+            raise NotImplementedError("The hyperface renaming is inaccurate, please ignore it for now.")
         else:
             raise ValueError(f"Unrecognized task '{task}' (run={run})")
 
