@@ -1,8 +1,18 @@
 import numpy as np
 from joblib import Parallel, delayed
-from scipy.spatial.distance import pdist
+from scipy.spatial.distance import pdist,cdist
 from scipy.stats import zscore
 
+def compute_isc_two_matrix(dms1,dms2,metric="correlation",n_jobs = -1):
+    dms1 = dms1.transpose(2,0,1) # reshape into nV,nS,nT
+    dms2 = dms2.transpose(2,0,1)
+    print(dms1.shape)
+    print(dms2.shape)
+    jobs = [delayed(cdist)(dm1,dm2,metric) for (dm1,dm2) in zip(dms1,dms2)]
+    with Parallel(n_jobs=n_jobs) as parallel:
+        isc = parallel(jobs)
+    isc = 1 - np.stack(isc, axis=1)
+    return isc
 
 def compute_isc_pairwise(dms, metric="correlation", n_jobs=-1):
     jobs = [delayed(pdist)(_, metric) for _ in dms.transpose(2, 0, 1)]
