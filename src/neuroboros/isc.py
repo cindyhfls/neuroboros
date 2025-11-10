@@ -1,30 +1,18 @@
 import numpy as np
 from joblib import Parallel, delayed
-from scipy.spatial.distance import pdist
+from scipy.spatial.distance import pdist,cdist
 from scipy.stats import zscore
 
-def compute_isc_pairwise_single(dm,dm_other=None,metric="correlation"):
-    '''
-    dm is shaped (nT,nV).It is either an individual dm or the mean or sum (doesn't matter) of a group
-    dm_other is shaped (nT,nV). It is either an individual dm or the mean or sum (doesn't matter) of a group NOT including dm.
-    We could also just do compute_isc_pairwise(np.stack([dm,dm_other],axis=0)), but it would be unnecessary to run things in parallel.
-    '''
-    if dm_other is None:
-        assert dm.shape[0]==2
-        a = dm[0],b = dm[1]
-    else:    
-        a, b = dm, dm_other
-
-    if metric == "correlation":
-        a = np.nan_to_num(zscore(a, axis=0))
-        b = np.nan_to_num(zscore(b, axis=0))
-        return np.mean(a * b, axis=0)
-    elif metric == "cosine":
-        a = np.nan_to_num(a / np.linalg.norm(a, axis=0, keepdims=True))
-        a = np.nan_to_num(b / np.linalg.norm(b, axis=0, keepdims=True))
-        return np.mean(a * b, axis=0)
-    else:
-        raise ValueError(f"Got metric={metric}.Expecting 'correlation' or 'cosine'")
+def compute_isc_two_matrix(dms1,dms2,metric="correlation",n_jobs = -1):
+    dms1 = dms1.transpose(2,0,1) # reshape into nV,nS,nT
+    dms2 = dms2.transpose(2,0,1)
+    print(dms1.shape)
+    print(dms2.shape)
+    jobs = [delayed(cdist)(dm1,dm2,metric) for (dm1,dm2) in zip(dms1,dms2)]
+    with Parallel(n_jobs=n_jobs) as parallel:
+        isc = parallel(jobs)
+    isc = 1 - np.stack(isc, axis=1)
+    return isc
 
 def compute_isc_pairwise(dms, metric="correlation", n_jobs=-1):
     jobs = [delayed(pdist)(_, metric) for _ in dms.transpose(2, 0, 1)]
