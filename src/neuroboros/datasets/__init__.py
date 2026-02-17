@@ -20,7 +20,7 @@ from glob import glob
 import numpy as np
 from scipy.stats import zscore
 
-from ..io import DatasetManager
+from ..io import DatasetManager,return_aseg_labels
 from ..spaces import get_mask
 
 SURFACE_SPACES = ["fsavg-ico32", "onavg-ico32", "onavg-ico48", "onavg-ico64"]
@@ -42,7 +42,6 @@ def guess_surface_volume(space, resample, lr):
     if lr in ["l", "r", "l-cerebrum", "r-cerebrum", "lr"]:
         return "surface"
     return "volume"
-
 
 def default_prep(dm, confounds, cortical_mask, z=True, mask=True, gsr=False):
     if mask and cortical_mask is not None:
@@ -112,6 +111,7 @@ def get_prep(name, **kwargs):
     prep = {
         "default": default_prep,
         "scrub": scrub_prep,
+        "none":None,
         "saved_beta":saved_beta_prep
     }[name]
     if gsr:
@@ -268,26 +268,6 @@ class Dataset:
         else:
             beta = np.load(beta_fn)
             return beta
-        # if lr in ["l", "r"]:
-        #     lr = f"{lr}-cerebrum"
-        # if self.rename_func is not None:
-        #     fn = [saved_beta_path,lr,
-        #         self.rename_func(sid, task, run),
-        #     ]
-        # elif self.renaming is None:
-        #     fn = [saved_beta_path,lr,
-        #         f"sub-{sid}_task-{task}_run-{run:02d}.npy",
-        #     ]
-        # else:
-        #     fn = [saved_beta_path,lr,
-        #         f"sub-{sid}_task-{task}_run-{run:02d}.npy",
-        #     ]
-        #     fn = self.renaming["/".join(fn)].split("/")
-        # if return_fn:
-        #     return os.path.join(*fn).replace('*','0')
-        # else:
-        #     beta = np.load(os.path.join(*fn).replace('*','0'))
-        #     return beta
         
     def load_confounds(self, sid, task, run, fp_version=None,return_fn = False):
         if fp_version is None:
@@ -409,6 +389,8 @@ class Dataset:
         prep_kwargs=None,
         slicer=None,
     ):
+        if isinstance(lr,str) and lr.lower()=='aseg_subcortex':
+            lr = return_aseg_labels() # Get all aseg rois in a list
         if isinstance(run, (tuple, list)):
             ret = [
                 self.get_data(
@@ -437,11 +419,39 @@ class Dataset:
             elif isinstance(ret[0], np.ndarray):
                 ret = np.concatenate(ret, axis=0)
             return ret
+        if isinstance(lr, (tuple, list)):
+            ret = [
+                self.get_data(
+                    sid,
+                    task,
+                    run,
+                    roi,
+                    space,
+                    resample,
+                    mask,
+                    prep,
+                    fp_version,
+                    force_volume,
+                    prep_kwargs,
+                )
+                for roi in lr
+            ]
+            if isinstance(ret[0], tuple):
+                n = len(ret[1])
+                ret = tuple(
+                    [
+                        np.concatenate([ret_[i] for ret_ in ret], axis=1)
+                        for i in range(n)
+                    ]
+                )
+            elif isinstance(ret[0], np.ndarray):
+                ret = np.concatenate(ret, axis=1)
+            return ret
 
         if force_volume:
             space_kind = "volume"
         else:
-            space_kind = guess_surface_volume(space, resample, lr)
+            space_kind = guess_surface_volume(space, resample, lr[0])
         if space is None:
             space = {
                 "surface": self.surface_space,
@@ -486,15 +496,13 @@ class Dataset:
                 else:
                     new_prep_kwargs["saved_beta_fn"] = self.load_saved_betas(sid,task,run,lr,space, resample, fp_version,saved_beta_path=prep_kwargs["saved_beta_path"],return_fn=True)
                 del new_prep_kwargs["load_beta"],new_prep_kwargs["saved_beta_path"]
-
         if isinstance(prep, str):
             prep = get_prep(prep, **new_prep_kwargs)
         if slicer is not None:
             dm = slicer(dm, task, run)
             confounds = [slicer(c, task, run) for c in confounds]
-
-        dm = prep(dm, confounds, cortical_mask)
-        
+        if prep is not None:
+            dm = prep(dm, confounds, cortical_mask)
         return dm
 
     def _get_anatomical_data(self, sid, which, lr, mask, space, fp_version):
