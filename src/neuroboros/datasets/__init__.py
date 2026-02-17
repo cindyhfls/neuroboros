@@ -43,7 +43,7 @@ def guess_surface_volume(space, resample, lr):
         return "surface"
     return "volume"
 
-def basic_prep(dm, cortical_mask, z=True, mask=True):
+def basic_prep(dm,confounds,cortical_mask, z=True, mask=True):
     if mask and cortical_mask is not None:
         dm = dm[:, cortical_mask]
     if z:
@@ -118,8 +118,8 @@ def get_prep(name, **kwargs):
     prep = {
         "default": default_prep,
         "scrub": scrub_prep,
-        "none":None,
         "basic":basic_prep,
+        "none":None,
         "saved_beta":saved_beta_prep
     }[name]
     if gsr:
@@ -211,16 +211,29 @@ class Dataset:
                 self.subject_sets[task] = f.read().splitlines()
 
     def load_data(self, sid, task, run, lr, space, resample, fp_version=None,return_fn=False):
-        if lr == "lr":
+        if isinstance(lr, str):
+            if lr == "lr":
+                dm = np.concatenate(
+                    [
+                        self.load_data(sid, task, run, lr_, space, resample, fp_version)
+                        for lr_ in "lr"
+                    ],
+                    axis=1,
+                )
+                return dm
+            elif lr.lower() == "aseg_subcortex":
+                lr = return_aseg_labels()  # Get all aseg rois in a list
+            elif lr.lower() == "tian_subcortex":
+                lr = "Tian_Subcortex"
+        if isinstance(lr, (tuple, list)):
             dm = np.concatenate(
                 [
-                    self.load_data(sid, task, run, lr_, space, resample, fp_version,return_fn)
-                    for lr_ in "lr"
+                    self.load_data(sid, task, run, roi, space, resample, fp_version)
+                    for roi in lr
                 ],
                 axis=1,
-            )
+                )
             return dm
-
         if fp_version is None:
             fp_version = self.fp_version
         if lr in ["l", "r"]:
@@ -397,8 +410,6 @@ class Dataset:
         prep_kwargs=None,
         slicer=None,
     ):
-        if isinstance(lr,str) and lr.lower()=='aseg_subcortex':
-            lr = return_aseg_labels() # Get all aseg rois in a list
         if isinstance(run, (tuple, list)):
             ret = [
                 self.get_data(
@@ -426,34 +437,6 @@ class Dataset:
                 )
             elif isinstance(ret[0], np.ndarray):
                 ret = np.concatenate(ret, axis=0)
-            return ret
-        if isinstance(lr, (tuple, list)):
-            ret = [
-                self.get_data(
-                    sid,
-                    task,
-                    run,
-                    roi,
-                    space,
-                    resample,
-                    mask,
-                    prep,
-                    fp_version,
-                    force_volume,
-                    prep_kwargs,
-                )
-                for roi in lr
-            ]
-            if isinstance(ret[0], tuple):
-                n = len(ret[1])
-                ret = tuple(
-                    [
-                        np.concatenate([ret_[i] for ret_ in ret], axis=1)
-                        for i in range(n)
-                    ]
-                )
-            elif isinstance(ret[0], np.ndarray):
-                ret = np.concatenate(ret, axis=1)
             return ret
 
         if force_volume:
