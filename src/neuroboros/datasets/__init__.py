@@ -14,13 +14,15 @@ Neuroboros datasets (:mod:`neuroboros.datasets`)
 """
 
 import os
+import re
 from functools import partial
 from glob import glob
 
 import numpy as np
 from scipy.stats import zscore
 
-from ..io import DatasetManager,return_aseg_labels
+from ..io import DatasetManager, return_aseg_labels
+from ..utils import load as _load_file
 from ..spaces import get_mask
 
 SURFACE_SPACES = ["fsavg-ico32", "onavg-ico32", "onavg-ico48", "onavg-ico64"]
@@ -29,9 +31,14 @@ SURFACE_RESAMPLES = [
     "1step_pial_area",
     "2step_normals-equal_nnfr",
     "2step_normals-sine_nnfr",
+    "msmsulc_uncleaned"
 ]
 VOLUME_SPACES = ["mni-2mm", "mni-3mm", "mni-4mm"]
-VOLUME_RESAMPLES = ["1step_linear_overlap", "1step_fmriprep_overlap","1step_linear_nilearn"]
+VOLUME_RESAMPLES = [
+    "1step_linear_overlap",
+    "1step_fmriprep_overlap",
+    "1step_linear_nilearn",
+]
 
 
 def guess_surface_volume(space, resample, lr):
@@ -43,12 +50,14 @@ def guess_surface_volume(space, resample, lr):
         return "surface"
     return "volume"
 
-def basic_prep(dm,confounds,cortical_mask, z=True, mask=True):
+
+def basic_prep(dm, confounds, cortical_mask, z=True, mask=True):
     if mask and cortical_mask is not None:
         dm = dm[:, cortical_mask]
     if z:
         dm = np.nan_to_num(zscore(dm, axis=0))
     return dm
+
 
 def default_prep(dm, confounds, cortical_mask, z=True, mask=True, gsr=False):
     if mask and cortical_mask is not None:
@@ -63,6 +72,7 @@ def default_prep(dm, confounds, cortical_mask, z=True, mask=True, gsr=False):
     if z:
         dm = np.nan_to_num(zscore(dm, axis=0))
     return dm
+
 
 def scrub_prep(dm, confounds, cortical_mask, z=True, mask=True, gsr=False):
     if mask and cortical_mask is not None:
@@ -79,9 +89,86 @@ def scrub_prep(dm, confounds, cortical_mask, z=True, mask=True, gsr=False):
         dm = np.nan_to_num(zscore(dm, axis=0))
     return dm, keep
 
-def saved_beta_prep(dm, confounds, cortical_mask, z=True, mask=True, gsr=False,beta = None, saved_beta_fn = None):
-    assert not((beta is None) and (saved_beta_fn is None)) 
-    def get_beta(dm, confounds, cortical_mask=None,gsr=False,mask=True):
+
+def make_tmask(
+    conf,
+    fd_threshold,
+    std_dvars_threshold,
+    non_steady_state_outlier: bool,
+    min_contiguous,
+):
+    if non_steady_state_outlier:
+        non_steady_state_outlier = conf.non_steady_state_outlier
+    else:
+        non_steady_state_outlier = np.full_like(
+            conf.non_steady_state_outlier, fill_value=False
+        )
+    mask = np.zeros((conf.shape[0],), dtype=bool)
+    if fd_threshold is not None or std_dvars_threshold is not None:
+        if fd_threshold is not None:
+            mask = np.logical_or(mask, conf["framewise_displacement"] > fd_threshold)
+        if std_dvars_threshold is not None:
+            mask = np.logical_or(mask, conf["std_dvars"] > std_dvars_threshold)
+        mask = np.logical_or(mask, non_steady_state_outlier)
+        mask = np.logical_not(mask)  # True = Keep, False = Outlier
+        if min_contiguous:
+            result = mask.copy()
+            n = len(mask)
+            i = 0
+            while i < n:
+                if mask[i]:  # Found a True value
+                    j = i
+                    while j < n and mask[j]:
+                        j += 1
+                    if (j - i) < min_contiguous:
+                        result[i:j] = False
+                    i = j  # Skip to the end of this segment
+                else:
+                    i += 1
+            mask = result
+        # save the dictionary
+        mask_descriptions = {
+            "fd_threshold": fd_threshold,
+            "std_dvars_threshold": std_dvars_threshold,
+            "non_steady_state_counter": np.sum(non_steady_state_outlier),
+            "contiguous_frames": min_contiguous,
+        }
+    return mask, mask_descriptions
+
+
+def advanced_scrub_prep(
+    dm, confounds, cortical_mask, z=True, mask=True, gsr=False, **kwargs
+):
+    if mask and cortical_mask is not None:
+        dm = dm[:, cortical_mask]
+    conf, conf_table, _ = confounds
+    keep, _ = make_tmask(conf_table, **kwargs)
+    if gsr:
+        gs = np.array(confounds[1]["global_signal"])
+        conf = np.concatenate([conf, gs[:, np.newaxis]], axis=1)
+    dm = dm[keep]
+    finite_mask = np.all(np.isfinite(dm), axis=0)
+    beta = np.linalg.lstsq(conf[keep], dm[:, finite_mask], rcond=None)[0]
+    dm[:, finite_mask] = dm[:, finite_mask] - conf[keep] @ beta
+    if z:
+        dm = np.nan_to_num(zscore(dm, axis=0))
+    return dm, keep
+
+
+def saved_beta_prep(
+    dm,
+    confounds,
+    cortical_mask,
+    z=True,
+    mask=True,
+    gsr=False,
+    beta=None,
+    saved_beta_fn=None,
+):
+    assert not ((beta is None) and (saved_beta_fn is None))
+    warning("This is only applicable for default processing now")
+
+    def get_beta(dm, confounds, cortical_mask=None, gsr=False, mask=True):
         if mask and cortical_mask is not None:
             dm = dm[:, cortical_mask]
         conf = confounds[0]
@@ -92,7 +179,9 @@ def saved_beta_prep(dm, confounds, cortical_mask, z=True, mask=True, gsr=False,b
         beta = np.linalg.lstsq(conf, dm[:, finite_mask], rcond=None)[0]
         return beta
 
-    def prep_with_saved_betas(dm, confounds, beta, cortical_mask = None, z=True,mask=True):
+    def prep_with_saved_betas(
+        dm, confounds, beta, cortical_mask=None, z=True, mask=True
+    ):
         if mask and cortical_mask is not None:
             dm = dm[:, cortical_mask]
         conf = confounds[0]
@@ -101,12 +190,16 @@ def saved_beta_prep(dm, confounds, cortical_mask, z=True, mask=True, gsr=False,b
         if z:
             dm = np.nan_to_num(zscore(dm, axis=0))
         return dm
+
     if beta is None:
-        beta = get_beta(dm, confounds, cortical_mask=cortical_mask,gsr=gsr,mask=mask)
-        os.makedirs(os.path.dirname(saved_beta_fn),exist_ok=True)
-        np.save(saved_beta_fn,beta)
-    dm = prep_with_saved_betas(dm, confounds, beta, cortical_mask = cortical_mask, z=z,mask=mask)
+        beta = get_beta(dm, confounds, cortical_mask=cortical_mask, gsr=gsr, mask=mask)
+        os.makedirs(os.path.dirname(saved_beta_fn), exist_ok=True)
+        np.save(saved_beta_fn, beta)
+    dm = prep_with_saved_betas(
+        dm, confounds, beta, cortical_mask=cortical_mask, z=z, mask=mask
+    )
     return dm
+
 
 def get_prep(name, **kwargs):
     if name.endswith("-gsr"):
@@ -118,15 +211,17 @@ def get_prep(name, **kwargs):
     prep = {
         "default": default_prep,
         "scrub": scrub_prep,
-        "basic":basic_prep,
-        "none":None,
-        "saved_beta":saved_beta_prep
+        "advanced_scrub": advanced_scrub_prep,
+        "basic": basic_prep,
+        "none": None,
+        "saved_beta": saved_beta_prep,
     }[name]
     if gsr:
         prep = partial(prep, gsr=True)
     if kwargs:
         prep = partial(prep, **kwargs)
     return prep
+
 
 class Dataset:
     def __init__(
@@ -210,7 +305,9 @@ class Dataset:
             with open(fn) as f:
                 self.subject_sets[task] = f.read().splitlines()
 
-    def load_data(self, sid, task, run, lr, space, resample, fp_version=None,return_fn=False):
+    def load_data(
+        self, sid, task, run, lr, space, resample, fp_version=None, 
+    ):
         if isinstance(lr, str):
             if lr == "lr":
                 dm = np.concatenate(
@@ -232,7 +329,7 @@ class Dataset:
                     for roi in lr
                 ],
                 axis=1,
-                )
+            )
             return dm
         if fp_version is None:
             fp_version = self.fp_version
@@ -266,31 +363,62 @@ class Dataset:
                 f"sub-{sid}_task-{task}_run-{run:02d}.npy",
             ]
             fn = self.renaming["/".join(fn)].split("/")
-        if return_fn:
-            return os.path.join(*fn)
-        else:
-            dm = self.dl_dset.get(fn, on_missing="raise").astype(np.float64)
-            return dm
-    
-    def load_saved_betas(self, sid, task, run, lr,  space, resample, fp_version=None,saved_beta_path=None, return_fn=False):
+
+        dm = self.dl_dset.get(fn, on_missing="raise")
+        if isinstance(dm, list):
+            dm = np.concatenate(
+                [_load_file(f).astype(np.float64) for f in dm], axis=0
+            )
+        elif isinstance(dm, np.ndarray):
+            dm = dm.astype(np.float64)
+        return dm
+
+    def load_saved_betas(
+        self,
+        sid,
+        task,
+        run,
+        lr,
+        space,
+        resample,
+        fp_version=None,
+        saved_beta_path=None,
+        return_fn=False,
+    ):
         if lr == "lr":
             beta = np.concatenate(
                 [
-                    self.load_saved_betas(sid, task, run, lr_,space, resample, fp_version, saved_beta_path,return_fn=False)
+                    self.load_saved_betas(
+                        sid,
+                        task,
+                        run,
+                        lr_,
+                        space,
+                        resample,
+                        fp_version,
+                        saved_beta_path,
+                        return_fn=False,
+                    )
                     for lr_ in "lr"
                 ],
                 axis=1,
             )
             return beta
-        data_fn = self.load_data(sid, task, run, lr, space, resample, fp_version=fp_version,return_fn=True)
-        beta_fn = os.path.join(saved_beta_path,data_fn).replace('.npy','_beta.npy').replace('*','0')
+        data_fn = self.load_data(
+            sid, task, run, lr, space, resample, fp_version=fp_version, return_fn=True
+        )
+        beta_fn = (
+            os.path.join(saved_beta_path, data_fn)
+            .replace(".npy", "_beta.npy")
+            .replace("*", "0")
+        )
         if return_fn:
             return beta_fn
         else:
             beta = np.load(beta_fn)
             return beta
-        
-    def load_confounds(self, sid, task, run, fp_version=None,return_fn = False):
+
+    def load_confounds(self, sid, task, run, fp_version=None, return_fn=False):
         if fp_version is None:
             fp_version = self.fp_version
         suffix_li = [
@@ -324,8 +452,15 @@ class Dataset:
                 fns.append(os.path.join(*fn))
             else:
                 o = self.dl_dset.get(fn, on_missing="raise")
+                if isinstance(o, list):
+                    loaded = [_load_file(f) for f in o]
+                    if isinstance(loaded[0], np.ndarray):
+                        o = np.concatenate(loaded, axis=0)
+                    else:
+                        import pandas as pd
+                        o = pd.concat(loaded, axis=0, ignore_index=True)
                 output.append(o)
-        
+
         if return_fn:
             return fns
         else:
@@ -395,6 +530,124 @@ class Dataset:
         output = self.dl_dset.get(fn, on_missing="raise")
         return output
 
+    def _lr_path(self, lr):
+        """Normalize lr to a single path component for globbing."""
+        if isinstance(lr, (tuple, list)):
+            lr = lr[0]
+        if lr == "lr":
+            return "l-cerebrum"
+        if lr in ["l", "r"]:
+            return f"{lr}-cerebrum"
+        return lr
+
+    def _list_sids(self, sid, task, run, lr, space, resample, fp_version):
+        """Return sorted list of available subject IDs by globbing the dataset."""
+        lr_path = self._lr_path(lr)
+        run_str = f"{run:02d}" if isinstance(run, int) else run
+        if self.rename_func is not None:
+            basename_pattern = self.rename_func(sid, task, run_str)
+            fns = glob(os.path.join(
+                self.dl_dset.root, fp_version, "resampled", space, lr_path, resample,
+                basename_pattern,
+            ))
+            return sorted({
+                m.group(1) for f in fns
+                if (m := re.search(r"sub-([^_]+)_", os.path.basename(f)))
+            })
+        elif self.renaming is None:
+            pattern = os.path.join(
+                self.dl_dset.root, fp_version, "resampled", space, lr_path, resample,
+                f"sub-{sid}_task-{task}_run-{run_str}.npy",
+            )
+            return sorted({
+                m.group(1) for f in glob(pattern)
+                if (m := re.search(r"sub-([^_]+)_task-", os.path.basename(f)))
+            })
+        else:
+            from fnmatch import fnmatch
+            key_pattern = f"{fp_version}/renamed/{space}/{lr_path}/{resample}/sub-{sid}_task-{task}_run-{run_str}.npy"
+            return sorted({
+                m.group(1) for key in self.renaming
+                if fnmatch(key, key_pattern) and (m := re.search(r"sub-([^_]+)_task-", key))
+            })
+
+    def _list_tasks(self, sid, task, run, lr, space, resample, fp_version):
+        """Return sorted list of available task names by globbing the dataset."""
+        lr_path = self._lr_path(lr)
+        run_str = f"{run:02d}" if isinstance(run, int) else run
+        if self.rename_func is not None:
+            basename_pattern = self.rename_func(sid, task, run_str)
+            fns = glob(os.path.join(
+                self.dl_dset.root, fp_version, "resampled", space, lr_path, resample,
+                basename_pattern,
+            ))
+            return sorted({
+                m.group(1) for f in fns
+                if (m := re.search(r"_task-([^_]+)_", os.path.basename(f)))
+            })
+        elif self.renaming is None:
+            pattern = os.path.join(
+                self.dl_dset.root, fp_version, "resampled", space, lr_path, resample,
+                f"sub-{sid}_task-{task}_run-{run_str}.npy",
+            )
+            return sorted({
+                m.group(1) for f in glob(pattern)
+                if (m := re.search(r"_task-([^_]+)_run-", os.path.basename(f)))
+            })
+        else:
+            from fnmatch import fnmatch
+            key_pattern = f"{fp_version}/renamed/{space}/{lr_path}/{resample}/sub-{sid}_task-{task}_run-{run_str}.npy"
+            return sorted({
+                m.group(1) for key in self.renaming
+                if fnmatch(key, key_pattern) and (m := re.search(r"_task-([^_]+)_run-", key))
+            })
+
+    def _list_runs(self, sid, task, lr, space, resample, fp_version):
+        """Return sorted list of available run numbers by globbing the dataset."""
+        lr_path = self._lr_path(lr)
+
+        if self.rename_func is not None:
+            basename_pattern = self.rename_func(sid, task, '*')
+            fns = sorted(glob(os.path.join(
+                self.dl_dset.root, fp_version, "resampled", space, lr_path, resample,
+                basename_pattern,
+            )))
+            runs = []
+            for fn in fns:
+                m = re.search(r"_run-(\d+)\.npy$", os.path.basename(fn))
+                if m:
+                    runs.append(int(m.group(1)))
+            return runs
+        elif self.renaming is None:
+            pattern = os.path.join(
+                self.dl_dset.root,
+                fp_version,
+                "resampled",
+                space,
+                lr_path,
+                resample,
+                f"sub-{sid}_task-{task}_run-*.npy",
+            )
+            fns = sorted(glob(pattern))
+            runs = []
+            for fn in fns:
+                m = re.search(r"_run-(\d+)\.npy$", os.path.basename(fn))
+                if m:
+                    runs.append(int(m.group(1)))
+            return runs
+        else:
+            # Renaming dict case: search keys matching the pattern
+            prefix = f"{fp_version}/renamed/{space}/{lr_path}/{resample}/sub-{sid}_task-{task}_run-"
+            runs = []
+            for key in self.renaming:
+                if key.startswith(prefix) and key.endswith(".npy"):
+                    run_str = key[len(prefix) : -4]
+                    try:
+                        runs.append(int(run_str))
+                    except ValueError:
+                        pass
+            return sorted(runs)
+
     def get_data(
         self,
         sid,
@@ -460,6 +713,43 @@ class Dataset:
         if slicer is None:
             slicer = getattr(self, "slicer", None)
 
+        if isinstance(sid, str) and "*" in sid:
+            sids = self._list_sids(sid, task, run, lr, space, resample, fp_version)
+            if not sids:
+                raise RuntimeError(f"No subjects found matching sid='{sid}'.")
+            ret = [
+                self.get_data(s, task, run, lr, space, resample, mask, prep,
+                              fp_version, force_volume, prep_kwargs, slicer)
+                for s in sids
+            ]
+            if isinstance(ret[0], tuple):
+                return tuple([np.concatenate([r[i] for r in ret], axis=0) for i in range(len(ret[0]))])
+            return np.concatenate(ret, axis=0)
+
+        if isinstance(task, str) and "*" in task:
+            tasks = self._list_tasks(sid, task, run, lr, space, resample, fp_version)
+            if not tasks:
+                raise RuntimeError(f"No tasks found matching task='{task}'.")
+            ret = [
+                self.get_data(sid, t, run, lr, space, resample, mask, prep,
+                              fp_version, force_volume, prep_kwargs, slicer)
+                for t in tasks
+            ]
+            if isinstance(ret[0], tuple):
+                return tuple([np.concatenate([r[i] for r in ret], axis=0) for i in range(len(ret[0]))])
+            return np.concatenate(ret, axis=0)
+
+        if isinstance(run, str) and "*" in run:
+            runs = self._list_runs(sid, task, lr, space, resample, fp_version)
+            if not runs:
+                raise RuntimeError(
+                    f"No runs found for sid={sid}, task={task} with the given parameters."
+                )
+            return self.get_data(
+                sid, task, runs, lr, space, resample, mask, prep,
+                fp_version, force_volume, prep_kwargs, slicer,
+            )
+
         dm = self.load_data(sid, task, run, lr, space, resample, fp_version)
         confounds = self.load_confounds(sid, task, run, fp_version)
         if space_kind == "surface":
@@ -478,15 +768,34 @@ class Dataset:
         if mask is not None:
             prep_kwargs["mask"] = mask
         new_prep_kwargs = prep_kwargs.copy()
-        if prep == 'saved_beta':
+        if prep == "saved_beta":
             if not prep_kwargs["saved_beta_path"]:
                 raise ValueError("Expect a valid saved_beta_path to be in prep_kwargs")
             else:
                 if prep_kwargs["load_beta"]:
-                    new_prep_kwargs["beta"] = self.load_saved_betas(sid,task,run,lr,space, resample, fp_version,saved_beta_path=prep_kwargs["saved_beta_path"])
+                    new_prep_kwargs["beta"] = self.load_saved_betas(
+                        sid,
+                        task,
+                        run,
+                        lr,
+                        space,
+                        resample,
+                        fp_version,
+                        saved_beta_path=prep_kwargs["saved_beta_path"],
+                    )
                 else:
-                    new_prep_kwargs["saved_beta_fn"] = self.load_saved_betas(sid,task,run,lr,space, resample, fp_version,saved_beta_path=prep_kwargs["saved_beta_path"],return_fn=True)
-                del new_prep_kwargs["load_beta"],new_prep_kwargs["saved_beta_path"]
+                    new_prep_kwargs["saved_beta_fn"] = self.load_saved_betas(
+                        sid,
+                        task,
+                        run,
+                        lr,
+                        space,
+                        resample,
+                        fp_version,
+                        saved_beta_path=prep_kwargs["saved_beta_path"],
+                        return_fn=True,
+                    )
+                del new_prep_kwargs["load_beta"], new_prep_kwargs["saved_beta_path"]
         if isinstance(prep, str):
             prep = get_prep(prep, **new_prep_kwargs)
         if slicer is not None:
@@ -980,7 +1289,8 @@ class Budapest(Dataset):
             "sid000535",
             "sid000560",
         ]
-    def rename_func(self,sid, task, run, suffix=".npy"):
+
+    def rename_func(self, sid, task, run, suffix=".npy"):
         """
         Renames the file base to the original data convention instead of by total runs
         Returns
@@ -998,22 +1308,28 @@ class Budapest(Dataset):
 
         elif task == "localizer":
             run_map = {
-                1:("1", "1"), 2:("1", "5"), 3:("2", "1"), 4:("2", "5"), 
+                1: ("1", "1"),
+                2: ("1", "5"),
+                3: ("2", "1"),
+                4: ("2", "5"),
                 # for some reason the resampled data had run-01 but confounds have run-1...
                 # so I had to use wildcard below
             }
             new_task = "localizer"
-            new_ses,new_run = run_map[run]
+            new_ses, new_run = run_map[run]
         elif task == "visualmemory":
             run_ = hyperface_runs.index(run) + 1
             new_task = "hyperface"
-            raise NotImplementedError("The hyperface renaming is inaccurate, please ignore it for now.")
+            raise NotImplementedError(
+                "The hyperface renaming is inaccurate, please ignore it for now."
+            )
         else:
             raise ValueError(f"Unrecognized task '{task}' (run={run})")
 
         # --- Construct standardized name ---
         basename = f"sub-{sid}_ses-{new_ses}_task-{new_task}_run-*{new_run}{suffix}"
         return basename
+
 
 class MonkeyKingdom(Dataset):
     def __init__(

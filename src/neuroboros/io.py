@@ -155,10 +155,15 @@ class DatasetManager:
             local_fn = os.path.join(self.root, fn)
 
         if "*" in local_fn:
-            fns = glob(local_fn)
-            assert (
-                len(fns) == 1
-            ), f"Expecting exactly 1 file, found {len(fns)} files matching: {local_fn}."
+            fns = sorted(glob(local_fn))
+            # assert (
+            #     len(fns) == 1
+            # ), f"Expecting exactly 1 file, found {len(fns)} files matching: {local_fn}."
+            if len(fns)==0:
+                raise RuntimeError(f"File {local_fn} not found.")
+            elif len(fns)>1:
+                warnings.warn(f"Expecting exactly 1 file, found {len(fns)} files matching: {local_fn}.") 
+                return fns
             local_fn = fns[0]
 
         if not os.path.exists(local_fn):
