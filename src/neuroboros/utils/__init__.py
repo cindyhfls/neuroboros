@@ -366,7 +366,13 @@ def save_results(
             if os.path.exists(running_fn):
                 while True:
                     with open(running_fn) as f:
-                        diff = datetime.now() - datetime.strptime(f.read(), fmt)
+                        content = f.read()
+                    try:
+                        diff = datetime.now() - datetime.strptime(content, fmt)
+                    except ValueError:
+                        # File is empty or malformed (race condition during write);
+                        # treat as just-started so we yield to the other process.
+                        diff = timedelta(0)
                     if diff < timedelta(hours=rerun_hours):
                         if not return_results:
                             return
