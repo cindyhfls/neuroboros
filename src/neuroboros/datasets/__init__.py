@@ -21,7 +21,7 @@ from glob import glob
 import numpy as np
 from scipy.stats import zscore
 
-from ..io import DatasetManager, return_aseg_labels
+from ..io import DatasetManager
 from ..utils import load as _load_file
 from ..spaces import get_mask
 
