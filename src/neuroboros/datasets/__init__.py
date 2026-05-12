@@ -167,7 +167,7 @@ def saved_beta_prep(
     saved_beta_fn=None,
 ):
     assert not ((beta is None) and (saved_beta_fn is None))
-    warning("This is only applicable for default processing now")
+    Warning("This is only applicable for default processing now")
 
     def get_beta(dm, confounds, cortical_mask=None, gsr=False, mask=True):
         if mask and cortical_mask is not None:
@@ -389,34 +389,33 @@ class Dataset:
             beta = np.concatenate(
                 [
                     self.load_saved_betas(
-                        sid,
-                        task,
-                        run,
-                        lr_,
-                        space,
-                        resample,
-                        fp_version,
-                        saved_beta_path,
-                        return_fn=False,
+                        sid, task, run, lr_, space, resample, fp_version, saved_beta_path
                     )
                     for lr_ in "lr"
                 ],
                 axis=1,
             )
             return beta
-        data_fn = self.load_data(
-            sid, task, run, lr, space, resample, fp_version=fp_version, return_fn=True
-        )
+        if fp_version is None:
+            fp_version = self.fp_version
+        if lr in ["l", "r"]:
+            lr = f"{lr}-cerebrum"
+        if self.rename_func is not None:
+            fn_parts = [fp_version, "resampled", space, lr, resample, self.rename_func(sid, task, run)]
+        elif self.renaming is None:
+            fn_parts = [fp_version, "resampled", space, lr, resample, f"sub-{sid}_task-{task}_run-{run:02d}.npy"]
+        else:
+            key = f"{fp_version}/renamed/{space}/{lr}/{resample}/sub-{sid}_task-{task}_run-{run:02d}.npy"
+            fn_parts = self.renaming[key].split("/")
         beta_fn = (
-            os.path.join(saved_beta_path, data_fn)
+            os.path.join(saved_beta_path, *fn_parts)
             .replace(".npy", "_beta.npy")
             .replace("*", "0")
         )
         if return_fn:
             return beta_fn
-        else:
-            beta = np.load(beta_fn)
-            return beta
+        beta = np.load(beta_fn)
+        return beta
 
     def load_confounds(self, sid, task, run, fp_version=None, return_fn=False):
         if fp_version is None:
