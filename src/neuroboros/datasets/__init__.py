@@ -725,10 +725,13 @@ class Dataset:
                 return tuple([np.concatenate([r[i] for r in ret], axis=0) for i in range(len(ret[0]))])
             return np.concatenate(ret, axis=0)
 
-        if isinstance(task, str) and "*" in task:
-            tasks = self._list_tasks(sid, task, run, lr, space, resample, fp_version)
-            if not tasks:
-                raise RuntimeError(f"No tasks found matching task='{task}'.")
+        if isinstance(task, (tuple, list)) or (isinstance(task, str) and "*" in task):
+            if isinstance(task, str):
+                tasks = self._list_tasks(sid, task, run, lr, space, resample, fp_version)
+                if not tasks:
+                    raise RuntimeError(f"No tasks found matching task='{task}'.")
+            else:
+                tasks = task
             ret = [
                 self.get_data(sid, t, run, lr, space, resample, mask, prep,
                               fp_version, force_volume, prep_kwargs, slicer)
