@@ -1,24 +1,9 @@
-"""
-===================================================
-Linear algebra utilities (:mod:`neuroboros.linalg`)
-===================================================
-
-.. currentmodule:: neuroboros.linalg
-
-.. autosummary::
-    :toctree:
-
-    safe_svd - Singular value decomposition without occasional LinAlgError crashes.
-    safe_polar - Polar decomposition without occasional LinAlgError crashes.
-    gram_pca - Principal component analysis based on the Gram matrix.
-
-"""
 import numpy as np
 from joblib import Parallel, cpu_count, delayed
-from scipy.linalg import LinAlgError, eigh, polar, svd
+from scipy.linalg import LinAlgError, polar, svd
 from scipy.stats import zscore
 
-from .ensemble import kfold_bagging
+from ..ensemble import kfold_bagging
 
 
 def safe_svd(X, remove_mean=True):
@@ -61,6 +46,24 @@ def safe_svd(X, remove_mean=True):
         U, s, Vt = svd(X, full_matrices=False, lapack_driver="gesvd")
 
     return U, s, Vt
+
+
+def svd_pca(X):
+    """
+    Principal component analysis (PCA) based on SVD.
+
+    Parameters
+    ----------
+    X : ndarray of shape (N, M)
+        Input matrix. Column means are always removed before computing PCA.
+
+    Returns
+    -------
+    PCs : ndarray of shape (N, K)
+        The principal components, where ``K = min(N, M)``.
+    """
+    U, s, _ = safe_svd(X, remove_mean=True)
+    return U * s[np.newaxis]
 
 
 def safe_polar(a, side="left"):
@@ -106,32 +109,6 @@ def safe_polar(a, side="left"):
     return u, p
 
 
-def gram_pca(gram, tol=1e-7):
-    """
-    Principal component analysis (PCA) based on the Gram matrix.
-
-    Parameters
-    ----------
-    gram : ndarray of shape (N, N)
-        The Gram matrix to be decomposed in NumPy array format.
-    tol : float, default=1e-7
-        Tolerance for the eigenvalues to be considered positive.
-
-    Returns
-    -------
-    PCs : ndarray of shape (N, N - 1)
-        The principal components (PCs) derived from the Gram matrix.
-    """
-
-    w, v = eigh(gram, lower=False)
-    assert np.all(w > -tol)
-    w[w < 0] = 0
-    U = v[:, ::-1][:, :-1]
-    s = np.sqrt(w[::-1][:-1])
-    PCs = U * s[np.newaxis]
-    return PCs
-
-
 def _ensemble_lstsq_chunk(X, Y, indices_li):
     n_samples, n_features = X.shape
     n_targets = Y.shape[1]
@@ -164,7 +141,7 @@ def _ensemble_lstsq_chunk(X, Y, indices_li):
     return beta, Yhat, R2, r
 
 
-def ensemble_lstsq(X, Y, n_folds=5, n_perms=20, seed=0, n_jobs=1):
+def ensemble_lstsq(X, Y, n_folds=5, n_reps=20, seed=0, n_jobs=1):
     """
     Linear regression with k-fold bagging.
 
@@ -176,8 +153,8 @@ def ensemble_lstsq(X, Y, n_folds=5, n_perms=20, seed=0, n_jobs=1):
         The target matrix.
     n_folds : int, default=5
         Number of folds.
-    n_perms : int, default=20
-        Number of permutations.
+    n_reps : int, default=20
+        Number of repetitions.
     seed : int, default=0
         Random seed for the random number generator.
 
@@ -196,7 +173,7 @@ def ensemble_lstsq(X, Y, n_folds=5, n_perms=20, seed=0, n_jobs=1):
     n_samples, n_features = X.shape
     n_targets = Y.shape[1]
 
-    indices_li = kfold_bagging(n_samples, n_folds=n_folds, n_perms=n_perms, seed=seed)
+    indices_li = kfold_bagging(n_samples, n_folds=n_folds, n_reps=n_reps, seed=seed)
     if n_jobs == 1:
         beta, Yhat, R2, r = _ensemble_lstsq_chunk(X, Y, indices_li)
     else:
