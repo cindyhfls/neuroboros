@@ -2055,6 +2055,8 @@ datasets = {
     "hca": HCA,
     "monkey-action": MonkeyAction,
     "bellaria": Bellaria,
+    "hcd": HCD,
+    "hbn":HBN,
 }
 
 def get_dataset(name, **kwargs):
