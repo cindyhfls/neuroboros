@@ -100,10 +100,10 @@ def make_tmask(
     min_contiguous,
 ):
     if non_steady_state_outlier:
-        non_steady_state_outlier = conf.non_steady_state_outlier
+        non_steady_state_outlier = conf["non_steady_state_outlier"]
     else:
         non_steady_state_outlier = np.full_like(
-            conf.non_steady_state_outlier, fill_value=False
+            conf["non_steady_state_outlier"], fill_value=False
         )
     mask = np.zeros((conf.shape[0],), dtype=bool)
     if fd_threshold is not None or std_dvars_threshold is not None:
